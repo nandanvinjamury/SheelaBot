@@ -1,0 +1,27 @@
+[Unit]
+Description=Sheela Discord Bot
+After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=sheela
+Group=sheela
+WorkingDirectory=/home/sheela/bot
+Environment="PATH=/home/sheela/bot/venv/bin:/usr/bin:/bin"
+EnvironmentFile=/home/sheela/.config/sheela.env
+ExecStart=/home/sheela/bot/venv/bin/python -m sheela
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/sheela/data /home/sheela/logs /home/sheela/vault
+
+[Install]
+WantedBy=multi-user.target
