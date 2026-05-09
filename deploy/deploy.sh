@@ -49,11 +49,14 @@ EOF
 echo "==> [2/4] Installing Python dependencies..."
 "${SSH_BASE[@]}" "sudo -u sheela $BOT_DIR/venv/bin/pip install --upgrade pip --quiet && sudo -u sheela $BOT_DIR/venv/bin/pip install -e $BOT_DIR --quiet"
 
-echo "==> [3/4] Installing systemd unit..."
+echo "==> [3/5] Seeding routing config (only if missing)..."
+"${SSH_BASE[@]}" "sudo -u sheela bash -c 'mkdir -p /home/sheela/.config && [ -f /home/sheela/.config/sheela-routing.yaml ] || install -m 644 $BOT_DIR/deploy/routing.yaml.example /home/sheela/.config/sheela-routing.yaml'"
+
+echo "==> [4/5] Installing systemd unit..."
 "${SCP_BASE[@]}" "$SCRIPT_DIR/sheela.service" "$VM_USER@$VM_IP:/tmp/sheela.service"
 "${SSH_BASE[@]}" "sudo install -m 644 /tmp/sheela.service /etc/systemd/system/$SERVICE_NAME && sudo systemctl daemon-reload && sudo systemctl enable $SERVICE_NAME && sudo systemctl restart $SERVICE_NAME && rm /tmp/sheela.service"
 
-echo "==> [4/4] Recent logs:"
+echo "==> [5/5] Recent logs:"
 "${SSH_BASE[@]}" "sudo journalctl -u $SERVICE_NAME -n 30 --no-pager" || true
 
 echo

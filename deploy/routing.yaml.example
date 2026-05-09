@@ -1,0 +1,119 @@
+# Sheela channel routing config.
+#
+# Each Discord channel maps to:
+#   description                            — short context block prepended to the system prompt
+#   vault_paths_to_load                    — files read into context proactively (parallel)
+#   vault_paths_writable_without_confirm   — allowlist for Step 5 vault writes (stored, not enforced yet)
+#   tone_hint                              — short voice/register guidance appended to system prompt
+#
+# Path templates: {date} -> today's date (YYYY-MM-DD) in SHEELA_TZ.
+# Glob patterns (Recipes/**, Hobbies/**/Match log.md) in writable_without_confirm
+# are stored as-is; Step 5 will interpret them with pathlib.PurePath.match.
+# Files that don't exist are silently skipped at read time (e.g., Daily/<today>.md
+# before the morning brief writes it).
+#
+# Lives at /home/sheela/.config/sheela-routing.yaml on the VM (mode 0644).
+# Path overridable via SHEELA_ROUTING_PATH. Edit and `sudo systemctl restart
+# sheela.service` to pick up changes — no redeploy needed.
+
+channels:
+  general:
+    description: Open-ended channel — anything that doesn't fit elsewhere.
+    vault_paths_to_load:
+      - Inbox.md
+      - Obligations.md
+      - Daily/{date}.md
+    vault_paths_writable_without_confirm:
+      - Inbox.md
+      - Daily/{date}.md
+    tone_hint: null
+
+  daily:
+    description: Today's note. Morning briefs, evening check-ins, throughout-the-day notes.
+    vault_paths_to_load:
+      - Daily/{date}.md
+      - Schedule/Google Calendar.md
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+    tone_hint: |
+      Voice mode for morning briefs and evening reviews; text for inline back-and-forth. Keep it concise.
+
+  scheduling:
+    description: Calendar logistics. Slotting events around protected recurring blocks.
+    vault_paths_to_load:
+      - Schedule/Google Calendar.md
+      - Obligations.md
+      - Daily/{date}.md
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+    tone_hint: null
+
+  people:
+    description: Personal CRM for /People/. Person-specific lookups arrive in the next iteration; for now work from what is said in the moment.
+    vault_paths_to_load: []
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+    tone_hint: null
+
+  money:
+    description: Financial reference. No money moves, no trades. Discuss earnings, investments, subscriptions, goals.
+    vault_paths_to_load:
+      - Money/Earnings.md
+      - Money/Investments.md
+      - Money/Subscriptions.md
+      - Money/Goals.md
+      - Money/Decisions.md
+      - Daily/{date}.md
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+    tone_hint: |
+      Educational, never prescriptive about specific moves. Hard rule reminder: never execute trades or move money.
+
+  health:
+    description: Movement, meals, sleep, energy. Recipes from /Recipes/, routines from /Exercise/, hobby logs from /Hobbies/.
+    vault_paths_to_load:
+      - Daily/{date}.md
+      - Exercise/Index.md
+      - Recipes/Rotation.md
+      - Recipes/Pantry.md
+      - Recipes/Shopping List.md
+      - Hobbies/Sport/Match log.md
+      - Hobbies/Sport/Skill notes.md
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+      - Recipes/**
+      - Exercise/**
+      - Hobbies/**/Match log.md
+    tone_hint: |
+      Supportive. Lean toward soft mode if stress signals are visible.
+
+  learning:
+    description: Active learning topics in /Learning/. Hands-on practice over passive content. Topic-specific notes looked up on demand.
+    vault_paths_to_load:
+      - Daily/{date}.md
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+    tone_hint: |
+      Hands-on framing preferred over passive content.
+
+  side-project:
+    description: Side project work. Kanban, decisions, architecture. Protected blocks on set evenings and weekend mornings.
+    vault_paths_to_load:
+      - Career/Side project/Kanban.md
+      - Career/Side project/Decisions.md
+      - Career/Side project/Architecture.md
+      - Daily/{date}.md
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+    tone_hint: |
+      Technical and focused. Frame decisions through the side project's current direction.
+
+  travel:
+    description: Trip planning and travel logs. International trips a couple of times a year; domestic occasional. Templates in /Travel/Templates/.
+    vault_paths_to_load:
+      - Travel/Templates/International.md
+      - Travel/Templates/Domestic.md
+      - Daily/{date}.md
+    vault_paths_writable_without_confirm:
+      - Daily/{date}.md
+    tone_hint: null

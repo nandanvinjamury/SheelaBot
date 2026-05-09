@@ -1,9 +1,11 @@
 """Gemini provider — primary backend.
 
-Implements LLMProvider via the google-genai SDK. Step 2 implements `respond`
-(non-streaming under the hood, yields a single ResponseChunk with the full
-text plus usage metadata). `embed` lands in Step 4 (RAG). `summarize` lands
-in Step 6 (memory compaction).
+Implements LLMProvider via the google-genai SDK. Step 3 honors `stream=True`
+via `generate_content_stream`. Backoff with jitter on 429 at request init;
+mid-stream errors propagate so the caller's partial output is preserved.
+Per-model rate-limit fallback (Flash → Pro) only applies when nothing has
+been yielded yet — once chunks have been emitted, errors propagate without
+a model swap to avoid jarring hand-offs mid-thought.
 """
 from __future__ import annotations
 
@@ -52,16 +54,13 @@ def _to_gemini_contents(messages: list[Message]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for m in messages:
         if m.role == "system":
-            continue  # handled via system_instruction
+            continue
         role = "model" if m.role == "assistant" else "user"
         out.append({"role": role, "parts": [{"text": m.content}]})
     return out
 
 
-def _extract_usage(
-    response: Any, model_name: str, latency_ms: int
-) -> dict[str, Any]:
-    meta = getattr(response, "usage_metadata", None)
+def _usage_dict(meta: Any, model_name: str, latency_ms: int) -> dict[str, Any]:
     return {
         "model": model_name,
         "input_tokens": getattr(meta, "prompt_token_count", 0) or 0,
@@ -72,7 +71,6 @@ def _extract_usage(
 
 
 def _extract_text(response: Any) -> str:
-    """Get response.text but tolerate the SDK's safety-filter raise."""
     try:
         return response.text or ""
     except (ValueError, AttributeError) as e:
@@ -95,34 +93,48 @@ class GeminiProvider:
         tools: list[Tool] | None = None,
         stream: bool = True,
     ) -> AsyncIterator[ResponseChunk]:
-        """Yield response chunks. Step 2 always yields exactly one chunk
-        with the full text + usage; Step 3 will honor stream=True."""
-        del tools, stream  # not yet used
+        del tools  # not yet used
 
         primary = self.router.route("respond", context_tokens=0)
         chain = [primary, *self.router.fallbacks_for(primary)]
 
         contents = _to_gemini_contents(messages)
-        config = genai_types.GenerateContentConfig(
-            system_instruction=system_prompt
-        )
+        config = genai_types.GenerateContentConfig(system_instruction=system_prompt)
 
         last_exc: Exception | None = None
+        yielded_anything = False
+
         for model_name in chain:
             try:
-                start = time.monotonic()
-                response = await self._call_with_backoff(
-                    model_name, contents, config
-                )
-                latency_ms = int((time.monotonic() - start) * 1000)
-                text = _extract_text(response)
-                usage = _extract_usage(response, model_name, latency_ms)
-                yield ResponseChunk(text=text, finish_reason="stop", usage=usage)
+                if stream:
+                    async for chunk in self._stream_with_backoff(
+                        model_name, contents, config
+                    ):
+                        yielded_anything = True
+                        yield chunk
+                else:
+                    start = time.monotonic()
+                    response = await self._call_with_backoff(
+                        model_name, contents, config
+                    )
+                    latency_ms = int((time.monotonic() - start) * 1000)
+                    yielded_anything = True
+                    yield ResponseChunk(
+                        text=_extract_text(response),
+                        finish_reason="stop",
+                        usage=_usage_dict(
+                            getattr(response, "usage_metadata", None),
+                            model_name,
+                            latency_ms,
+                        ),
+                    )
                 return
             except genai_errors.ClientError as e:
                 if not _is_rate_limit(e):
                     raise
                 last_exc = e
+                if yielded_anything:
+                    raise
                 idx = chain.index(model_name)
                 log.warning(
                     "model rate-limited, trying fallback",
@@ -134,6 +146,60 @@ class GeminiProvider:
         raise RateLimitExhausted(
             f"all models in chain exhausted: {chain}"
         ) from last_exc
+
+    async def _stream_with_backoff(
+        self,
+        model_name: str,
+        contents: list[dict[str, Any]],
+        config: genai_types.GenerateContentConfig,
+    ) -> AsyncIterator[ResponseChunk]:
+        # Init: backoff/retry on 429. Iteration: errors propagate.
+        stream = None
+        last_exc: Exception | None = None
+        start = time.monotonic()
+        for attempt in range(MAX_BACKOFF_ATTEMPTS):
+            try:
+                stream = await self._client.aio.models.generate_content_stream(
+                    model=model_name,
+                    contents=contents,  # type: ignore[arg-type]
+                    config=config,
+                )
+                break
+            except genai_errors.ClientError as e:
+                if not _is_rate_limit(e):
+                    raise
+                last_exc = e
+                if attempt == MAX_BACKOFF_ATTEMPTS - 1:
+                    raise
+                base = BACKOFF_BASE_SECONDS * (2 ** attempt)
+                delay = base + random.uniform(0, BACKOFF_JITTER_FRACTION * base)
+                log.info(
+                    "backoff before stream retry",
+                    model=model_name,
+                    attempt=attempt + 1,
+                    delay_seconds=round(delay, 2),
+                )
+                await asyncio.sleep(delay)
+        if stream is None:
+            assert last_exc is not None
+            raise last_exc
+
+        last_usage_meta: Any = None
+        async for sdk_chunk in stream:
+            text = sdk_chunk.text or ""
+            meta = getattr(sdk_chunk, "usage_metadata", None)
+            if meta is not None:
+                last_usage_meta = meta
+            if text:
+                yield ResponseChunk(text=text)
+
+        if last_usage_meta is not None:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            yield ResponseChunk(
+                text="",
+                finish_reason="stop",
+                usage=_usage_dict(last_usage_meta, model_name, latency_ms),
+            )
 
     async def _call_with_backoff(
         self,
@@ -176,5 +242,4 @@ class GeminiProvider:
         )
 
 
-# Structural-typing self-check at import time: catches signature drift early.
 _: type[LLMProvider] = GeminiProvider  # type: ignore[assignment]

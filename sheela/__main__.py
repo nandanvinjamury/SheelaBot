@@ -5,6 +5,7 @@ import structlog
 
 from sheela.config import Settings
 from sheela.discord_bot.bot import create_bot
+from sheela.discord_bot.routing import ChannelRouter
 from sheela.llm import make_provider
 from sheela.llm.router import ModelRouter
 from sheela.llm.usage import UsageLogger
@@ -18,9 +19,14 @@ def main() -> None:
     log = structlog.get_logger("sheela")
 
     persona = PersonaLoader(settings.vault_repo_path)
-    router = ModelRouter()
+    model_router = ModelRouter()
     usage = UsageLogger(settings.sheela_log_dir)
-    llm = make_provider(settings, router=router)
+    llm = make_provider(settings, router=model_router)
+    channel_router = ChannelRouter(
+        settings.sheela_routing_path,
+        settings.vault_repo_path,
+        settings.sheela_tz,
+    )
 
     log.info(
         "starting sheela bot",
@@ -28,9 +34,17 @@ def main() -> None:
         llm_provider=settings.llm_provider,
         log_mode=settings.sheela_log_mode,
         vault=str(settings.vault_repo_path),
+        routing=str(settings.sheela_routing_path),
+        channels=sorted(channel_router.config.channels.keys()),
     )
 
-    bot = create_bot(settings, llm=llm, persona=persona, usage_logger=usage)
+    bot = create_bot(
+        settings,
+        llm=llm,
+        persona=persona,
+        channel_router=channel_router,
+        usage_logger=usage,
+    )
     bot.run(settings.discord_bot_token.get_secret_value(), log_handler=None)
 
 

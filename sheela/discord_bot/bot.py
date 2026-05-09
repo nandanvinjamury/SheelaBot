@@ -1,9 +1,9 @@
 """Discord client.
 
-Step 2 wires up the LLM: every non-bot, non-DM, configured-guild message
-that isn't the literal `ping` connectivity check gets sent to the LLM,
-and the response is posted back. No streaming yet (Step 3); no memory
-yet (Step 6).
+Step 3: every non-bot, non-DM message in the configured guild gets routed
+to the LLM with channel-specific context appended to the system prompt,
+and the response is streamed back via in-place message edits. The literal
+`ping` connectivity test still bypasses the LLM.
 """
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ import discord
 import structlog
 
 from sheela.config import Settings
+from sheela.discord_bot.routing import ChannelRouter
+from sheela.discord_bot.streaming import stream_to_discord
 from sheela.llm.base import LLMProvider, Message, RateLimitExhausted
 from sheela.llm.usage import UsageLogger
 from sheela.persona import PersonaLoader
 
 log = structlog.get_logger(__name__)
-
-DISCORD_MAX_CHARS = 1990  # 2000 hard limit; leave headroom for safety
 
 
 def respond_to(content: str) -> str | None:
@@ -29,29 +29,13 @@ def respond_to(content: str) -> str | None:
             return None
 
 
-def split_for_discord(text: str, max_chars: int = DISCORD_MAX_CHARS) -> list[str]:
-    if len(text) <= max_chars:
-        return [text] if text else []
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > max_chars:
-        slice_ = remaining[:max_chars]
-        split_at = slice_.rfind(" ")
-        if split_at == -1:
-            split_at = max_chars
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-    if remaining:
-        chunks.append(remaining)
-    return chunks
-
-
 class SheelaClient(discord.Client):
     def __init__(
         self,
         settings: Settings,
         llm: LLMProvider,
         persona: PersonaLoader,
+        channel_router: ChannelRouter,
         usage_logger: UsageLogger,
     ) -> None:
         intents = discord.Intents.default()
@@ -60,6 +44,7 @@ class SheelaClient(discord.Client):
         self.settings = settings
         self.llm = llm
         self.persona = persona
+        self.channel_router = channel_router
         self.usage_logger = usage_logger
 
     async def on_ready(self) -> None:
@@ -99,64 +84,71 @@ class SheelaClient(discord.Client):
         me_id = self.user.id
         return content.replace(f"<@{me_id}>", "").replace(f"<@!{me_id}>", "")
 
+    @staticmethod
+    def _channel_name(channel: discord.abc.Messageable) -> str:
+        name = getattr(channel, "name", None)
+        return f"#{name}" if name else str(channel)
+
     async def _handle_llm_message(
         self, message: discord.Message, content: str
     ) -> None:
-        channel_name = (
-            f"#{message.channel.name}"
-            if isinstance(message.channel, discord.TextChannel)
-            else str(message.channel)
-        )
+        channel_obj = message.channel
+        channel_name = self._channel_name(channel_obj)
+
         try:
-            async with message.channel.typing():
-                system_prompt = await self.persona.get_system_prompt()
-                messages = [Message(role="user", content=content)]
-                full_text = ""
-                last_usage: dict[str, object] | None = None
-                async for chunk in self.llm.respond(
-                    system_prompt, messages, stream=False
-                ):
-                    full_text += chunk.text
-                    if chunk.usage is not None:
-                        last_usage = chunk.usage
+            async with channel_obj.typing():
+                persona_part = await self.persona.get_system_prompt()
+                channel_part = await self.channel_router.get_channel_context(
+                    channel_name
+                )
+
+            system_prompt = persona_part
+            if channel_part:
+                system_prompt = system_prompt + "\n\n---\n\n" + channel_part
+
+            messages = [Message(role="user", content=content)]
+            response_iter = self.llm.respond(
+                system_prompt, messages, stream=True
+            )
+            full_text, usage = await stream_to_discord(channel_obj, response_iter)
         except RateLimitExhausted:
             log.warning(
                 "rate-limited; replying with fallback message",
                 channel=channel_name,
             )
-            await message.channel.send("Rate-limited, try again in an hour.")
+            await channel_obj.send("Rate-limited, try again in an hour.")
             return
         except Exception as e:
             log.exception(
                 "llm call failed", channel=channel_name, error=str(e)
             )
-            await message.channel.send(
+            await channel_obj.send(
                 "Something broke on my end. Logs have details."
             )
             return
 
-        if last_usage is not None:
+        if usage is not None:
             await self.usage_logger.log(
                 channel=channel_name,
                 task="respond",
-                **last_usage,
+                **usage,
             )
 
         if not full_text.strip():
             log.warning("empty response from llm", channel=channel_name)
-            await message.channel.send(
-                "I came back empty on that one — try rephrasing?"
-            )
-            return
-
-        for piece in split_for_discord(full_text):
-            await message.channel.send(piece)
 
 
 def create_bot(
     settings: Settings,
     llm: LLMProvider,
     persona: PersonaLoader,
+    channel_router: ChannelRouter,
     usage_logger: UsageLogger,
 ) -> SheelaClient:
-    return SheelaClient(settings, llm=llm, persona=persona, usage_logger=usage_logger)
+    return SheelaClient(
+        settings,
+        llm=llm,
+        persona=persona,
+        channel_router=channel_router,
+        usage_logger=usage_logger,
+    )

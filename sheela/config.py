@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     vault_repo_path: Path = Path("/home/sheela/vault")
 
+    sheela_routing_path: Path = Path("/home/sheela/.config/sheela-routing.yaml")
+
     sheela_data_dir: Path = Path("/home/sheela/data")
     sheela_log_dir: Path = Path("/home/sheela/logs")
     sheela_db_path: Path = Path("/home/sheela/data/sheela.db")

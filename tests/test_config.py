@@ -26,6 +26,7 @@ def test_settings_defaults(env: None):
     assert s.sheela_log_mode == "console"
     assert s.sheela_log_level == "INFO"
     assert s.sheela_debug is False
+    assert str(s.sheela_routing_path).endswith("sheela-routing.yaml")
 
 
 def test_settings_anthropic_optional(monkeypatch: pytest.MonkeyPatch, env: None):
