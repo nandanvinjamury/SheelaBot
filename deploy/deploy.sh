@@ -9,17 +9,13 @@ set -euo pipefail
 VM_IP="${VM_IP:-REPLACE_WITH_VM_PUBLIC_IP}"
 VM_USER="${VM_USER:-ubuntu}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/sheela_vm_key}"
-BOT_REPO_URL="${BOT_REPO_URL:-git@github.com:REPLACE_WITH_USER/SheelaBot.git}"
+BOT_REPO_URL="${BOT_REPO_URL:-git@github.com:nandanvinjamury/SheelaBot.git}"
 BOT_DIR="/home/sheela/bot"
 SERVICE_NAME="sheela.service"
 # -----------------------------------------------------------------------------
 
 if [[ "$VM_IP" == "REPLACE_WITH_VM_PUBLIC_IP" ]]; then
     echo "ERROR: set VM_IP at the top of deploy.sh (or as env var)." >&2
-    exit 1
-fi
-if [[ "$BOT_REPO_URL" == *REPLACE_WITH_USER* ]]; then
-    echo "ERROR: set BOT_REPO_URL at the top of deploy.sh (or as env var)." >&2
     exit 1
 fi
 if [[ ! -f "$SSH_KEY" ]]; then

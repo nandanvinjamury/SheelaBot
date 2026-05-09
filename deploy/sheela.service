@@ -10,6 +10,7 @@ User=sheela
 Group=sheela
 WorkingDirectory=/home/sheela/bot
 Environment="PATH=/home/sheela/bot/venv/bin:/usr/bin:/bin"
+Environment=SHEELA_LOG_MODE=file
 EnvironmentFile=/home/sheela/.config/sheela.env
 ExecStart=/home/sheela/bot/venv/bin/python -m sheela
 Restart=on-failure

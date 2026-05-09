@@ -1,13 +1,12 @@
 """Discord client. Step 1: replies 'pong' to 'ping'."""
 from __future__ import annotations
 
-import logging
-
 import discord
+import structlog
 
 from sheela.config import Settings
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 def respond_to(content: str) -> str | None:
@@ -31,15 +30,15 @@ class SheelaClient(discord.Client):
 
     async def on_ready(self) -> None:
         user_id = self.user.id if self.user else None
-        log.info("Connected as %s (id=%s)", self.user, user_id)
+        log.info("connected", user=str(self.user), user_id=user_id)
         guild = self.get_guild(self.settings.discord_guild_id)
         if guild is None:
             log.warning(
-                "Configured guild %s not in connected guilds",
-                self.settings.discord_guild_id,
+                "configured guild not in connected guilds",
+                guild_id=self.settings.discord_guild_id,
             )
         else:
-            log.info("Watching guild '%s'", guild.name)
+            log.info("watching guild", guild=guild.name, guild_id=guild.id)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -53,7 +52,12 @@ class SheelaClient(discord.Client):
         if reply is None:
             return
 
-        log.info("Replying in #%s: %r -> %r", message.channel, message.content, reply)
+        log.info(
+            "replying",
+            channel=str(message.channel),
+            received=message.content,
+            sent=reply,
+        )
         await message.channel.send(reply)
 
 
