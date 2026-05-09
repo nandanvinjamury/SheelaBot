@@ -15,6 +15,7 @@ class OllamaLocalProvider:
         stream: bool = True,
     ) -> AsyncIterator[ResponseChunk]:
         raise NotImplementedError("OllamaLocalProvider — future, not implemented yet")
+        yield  # noqa — unreachable; required to make this an async generator
 
     async def embed(self, text: str) -> list[float]:
         raise NotImplementedError("OllamaLocalProvider — future, not implemented yet")

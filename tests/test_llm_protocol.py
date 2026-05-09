@@ -1,41 +1,43 @@
 """Smoke test for the LLM provider abstraction.
 
-Step 1 only verifies the contract: every concrete provider satisfies the
-Protocol structurally and the stub methods raise NotImplementedError.
-Real behavior arrives in Step 2 (Gemini) and beyond.
+Verifies that stub providers structurally satisfy the Protocol and that
+their methods raise NotImplementedError. GeminiProvider is now a real
+implementation and is exercised through integration; not unit-tested here.
 """
 import pytest
 
 from sheela.llm.anthropic import AnthropicProvider
 from sheela.llm.base import LLMProvider, Message, ResponseChunk, Tool
-from sheela.llm.gemini import GeminiProvider
 from sheela.llm.ollama_local import OllamaLocalProvider
 
 
-PROVIDERS = [GeminiProvider, AnthropicProvider, OllamaLocalProvider]
+STUB_PROVIDERS = [AnthropicProvider, OllamaLocalProvider]
 
 
-@pytest.mark.parametrize("provider_cls", PROVIDERS)
-def test_provider_satisfies_protocol(provider_cls):
+@pytest.mark.parametrize("provider_cls", STUB_PROVIDERS)
+def test_stub_provider_satisfies_protocol(provider_cls):
     provider = provider_cls()
     assert isinstance(provider, LLMProvider)
 
 
-@pytest.mark.parametrize("provider_cls", PROVIDERS)
+@pytest.mark.parametrize("provider_cls", STUB_PROVIDERS)
 async def test_respond_raises_not_implemented(provider_cls):
     provider = provider_cls()
     with pytest.raises(NotImplementedError):
-        await provider.respond("system", [Message(role="user", content="hi")])
+        async for _ in provider.respond(
+            "system", [Message(role="user", content="hi")]
+        ):
+            pass
 
 
-@pytest.mark.parametrize("provider_cls", PROVIDERS)
+@pytest.mark.parametrize("provider_cls", STUB_PROVIDERS)
 async def test_embed_raises_not_implemented(provider_cls):
     provider = provider_cls()
     with pytest.raises(NotImplementedError):
         await provider.embed("text")
 
 
-@pytest.mark.parametrize("provider_cls", PROVIDERS)
+@pytest.mark.parametrize("provider_cls", STUB_PROVIDERS)
 async def test_summarize_raises_not_implemented(provider_cls):
     provider = provider_cls()
     with pytest.raises(NotImplementedError):

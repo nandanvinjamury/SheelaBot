@@ -19,6 +19,7 @@ class AnthropicProvider:
         stream: bool = True,
     ) -> AsyncIterator[ResponseChunk]:
         raise NotImplementedError("AnthropicProvider — fallback, not implemented yet")
+        yield  # noqa — unreachable; required to make this an async generator
 
     async def embed(self, text: str) -> list[float]:
         raise NotImplementedError("AnthropicProvider — fallback, not implemented yet")
