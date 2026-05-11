@@ -1,9 +1,9 @@
 """Local Ollama provider — future option for fully-local inference."""
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
-from sheela.llm.base import Message, ResponseChunk, Tool
+from sheela.llm.base import Message, ResponseChunk
 
 
 class OllamaLocalProvider:
@@ -11,7 +11,7 @@ class OllamaLocalProvider:
         self,
         system_prompt: str,
         messages: list[Message],
-        tools: list[Tool] | None = None,
+        tools: list[Callable[..., Any]] | None = None,
         stream: bool = True,
     ) -> AsyncIterator[ResponseChunk]:
         raise NotImplementedError("OllamaLocalProvider — future, not implemented yet")

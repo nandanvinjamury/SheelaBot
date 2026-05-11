@@ -1,18 +1,18 @@
 """Gemini provider — primary backend.
 
-Implements LLMProvider via the google-genai SDK. Step 3 honors `stream=True`
-via `generate_content_stream`. Backoff with jitter on 429 at request init;
-mid-stream errors propagate so the caller's partial output is preserved.
-Per-model rate-limit fallback (Flash → Pro) only applies when nothing has
-been yielded yet — once chunks have been emitted, errors propagate without
-a model swap to avoid jarring hand-offs mid-thought.
+Implements LLMProvider via the google-genai SDK. Step 3 added streaming;
+Step 4 adds automatic function calling: pass Python callables in `tools`
+and the SDK orchestrates the tool-call loop. Backoff with jitter on 429 at
+request init; mid-stream errors propagate so the caller's partial output
+is preserved. Per-model rate-limit fallback (Flash → Pro) only applies
+when nothing has been yielded yet.
 """
 from __future__ import annotations
 
 import asyncio
 import random
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import structlog
 from google import genai
@@ -25,7 +25,6 @@ from sheela.llm.base import (
     Message,
     RateLimitExhausted,
     ResponseChunk,
-    Tool,
 )
 from sheela.llm.router import ModelRouter
 
@@ -45,12 +44,6 @@ def _is_rate_limit(exc: BaseException) -> bool:
 
 
 def _to_gemini_contents(messages: list[Message]) -> list[dict[str, Any]]:
-    """Translate our Message list into Gemini's content format.
-
-    Gemini uses 'user' and 'model' roles (not 'assistant'). System prompts
-    are passed through GenerateContentConfig.system_instruction, not as
-    messages.
-    """
     out: list[dict[str, Any]] = []
     for m in messages:
         if m.role == "system":
@@ -78,6 +71,15 @@ def _extract_text(response: Any) -> str:
         return ""
 
 
+def _build_config(
+    system_prompt: str, tools: list[Callable[..., Any]] | None
+) -> genai_types.GenerateContentConfig:
+    kwargs: dict[str, Any] = {"system_instruction": system_prompt}
+    if tools:
+        kwargs["tools"] = list(tools)
+    return genai_types.GenerateContentConfig(**kwargs)
+
+
 class GeminiProvider:
     def __init__(self, settings: Settings, router: ModelRouter | None = None) -> None:
         self.settings = settings
@@ -90,16 +92,14 @@ class GeminiProvider:
         self,
         system_prompt: str,
         messages: list[Message],
-        tools: list[Tool] | None = None,
+        tools: list[Callable[..., Any]] | None = None,
         stream: bool = True,
     ) -> AsyncIterator[ResponseChunk]:
-        del tools  # not yet used
-
         primary = self.router.route("respond", context_tokens=0)
         chain = [primary, *self.router.fallbacks_for(primary)]
 
         contents = _to_gemini_contents(messages)
-        config = genai_types.GenerateContentConfig(system_instruction=system_prompt)
+        config = _build_config(system_prompt, tools)
 
         last_exc: Exception | None = None
         yielded_anything = False
@@ -153,7 +153,6 @@ class GeminiProvider:
         contents: list[dict[str, Any]],
         config: genai_types.GenerateContentConfig,
     ) -> AsyncIterator[ResponseChunk]:
-        # Init: backoff/retry on 429. Iteration: errors propagate.
         stream = None
         last_exc: Exception | None = None
         start = time.monotonic()

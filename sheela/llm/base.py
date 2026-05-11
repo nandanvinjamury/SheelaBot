@@ -2,11 +2,15 @@
 
 Every backend (Gemini, Anthropic, local Ollama, ...) implements LLMProvider.
 Switching providers is a config change, not a code change.
+
+Tools are passed as Python callables; the provider is responsible for
+introspecting them (Gemini does this automatically) or converting them to
+whatever declarative form its SDK requires.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Literal, Protocol, runtime_checkable
+from typing import Any, AsyncIterator, Callable, Literal, Protocol, runtime_checkable
 
 
 TaskType = Literal[
@@ -22,13 +26,6 @@ class RateLimitExhausted(Exception):
 class Message:
     role: Literal["user", "assistant", "system"]
     content: str
-
-
-@dataclass(frozen=True)
-class Tool:
-    name: str
-    description: str
-    parameters: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -50,7 +47,7 @@ class LLMProvider(Protocol):
         self,
         system_prompt: str,
         messages: list[Message],
-        tools: list[Tool] | None = None,
+        tools: list[Callable[..., Any]] | None = None,
         stream: bool = True,
     ) -> AsyncIterator[ResponseChunk]: ...
 

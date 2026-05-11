@@ -2,13 +2,13 @@
 
 Loads the per-channel YAML config and produces a context block appended to
 the system prompt for each Discord message. Vault files listed under
-`vault_paths_to_load` are read in parallel; missing files are skipped silently.
-The `vault_paths_writable_without_confirm` allowlist is parsed and exposed
-via `get_writable_paths` for Step 5 to consume.
+`vault_paths_to_load` are read in parallel through VaultReader (so the
+lazy git-pull check happens before content is read). Missing files are
+skipped silently. The `vault_paths_writable_without_confirm` allowlist is
+parsed and exposed via `get_writable_paths` for Step 5 to consume.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 import structlog
 import yaml
 from pydantic import BaseModel, Field
+
+from sheela.tools.vault_read import VaultReader
 
 log = structlog.get_logger(__name__)
 
@@ -34,9 +36,11 @@ class RoutingConfig(BaseModel):
 class ChannelRouter:
     SECTION_SEPARATOR = "\n\n"
 
-    def __init__(self, config_path: Path, vault_path: Path, tz: str) -> None:
+    def __init__(
+        self, config_path: Path, vault_reader: VaultReader, tz: str
+    ) -> None:
         self.config_path = config_path
-        self.vault_path = vault_path
+        self.reader = vault_reader
         self.tz = tz
         self.config = self._load_config(config_path)
 
@@ -90,20 +94,5 @@ class ChannelRouter:
         if not path_templates:
             return []
         resolved = [self._resolve_path(p) for p in path_templates]
-        results = await asyncio.gather(
-            *[self._read_one(p) for p in resolved],
-            return_exceptions=True,
-        )
-        out: list[tuple[str, str]] = []
-        for path, result in zip(resolved, results):
-            if isinstance(result, FileNotFoundError):
-                log.debug("vault file missing, skipping", path=path)
-            elif isinstance(result, BaseException):
-                log.warning("vault read failed", path=path, error=str(result))
-            else:
-                out.append((path, result))
-        return out
-
-    async def _read_one(self, relative_path: str) -> str:
-        full = self.vault_path / relative_path
-        return await asyncio.to_thread(full.read_text, encoding="utf-8")
+        contents = await self.reader.read_many(resolved)
+        return [(p, contents[p]) for p in resolved if p in contents]

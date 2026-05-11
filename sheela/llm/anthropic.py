@@ -5,9 +5,9 @@ ANTHROPIC_API_KEY and LLM_PROVIDER=anthropic.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
-from sheela.llm.base import Message, ResponseChunk, Tool
+from sheela.llm.base import Message, ResponseChunk
 
 
 class AnthropicProvider:
@@ -15,7 +15,7 @@ class AnthropicProvider:
         self,
         system_prompt: str,
         messages: list[Message],
-        tools: list[Tool] | None = None,
+        tools: list[Callable[..., Any]] | None = None,
         stream: bool = True,
     ) -> AsyncIterator[ResponseChunk]:
         raise NotImplementedError("AnthropicProvider — fallback, not implemented yet")
