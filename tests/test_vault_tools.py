@@ -62,6 +62,41 @@ async def test_vault_list_unknown_type_returns_empty(tools: VaultTools):
 
 def test_get_callable_tools(tools: VaultTools):
     callables = tools.get_callable_tools()
+    # tools fixture has no searcher → only read + list
     assert len(callables) == 2
     names = {c.__name__ for c in callables}
     assert names == {"vault_read", "vault_list"}
+
+
+async def test_vault_search_returns_helpful_error_when_uninitialized(
+    tools: VaultTools,
+):
+    # tools fixture builds VaultTools without a searcher
+    results = await tools.vault_search("anything")
+    assert len(results) == 1
+    assert "error" in results[0]
+    assert "not initialized" in results[0]["error"].lower()
+
+
+def test_get_callable_tools_includes_search_when_configured(
+    vault, tmp_path
+):
+    from sheela.rag.embeddings import GeminiEmbedder
+    from sheela.rag.hybrid import HybridSearcher
+    from sheela.rag.store import RAGStore
+    from sheela.tools.vault_read import VaultReader
+    from sheela.vault.index import VaultIndexer
+
+    # Just construct the wiring; don't connect or call
+    reader = VaultReader(vault)
+    indexer = VaultIndexer(reader, tmp_path / "idx.json")
+
+    class _FakeEmbedder:
+        async def embed_one(self, text):
+            return [0.0] * 768
+
+    store = RAGStore(tmp_path / "rag.db")
+    searcher = HybridSearcher(store, _FakeEmbedder())  # type: ignore[arg-type]
+    tools_with_search = VaultTools(reader, indexer, searcher=searcher)
+    names = {c.__name__ for c in tools_with_search.get_callable_tools()}
+    assert names == {"vault_read", "vault_list", "vault_search"}

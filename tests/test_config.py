@@ -28,6 +28,7 @@ def test_settings_defaults(env: None):
     assert s.sheela_debug is False
     assert str(s.sheela_routing_path).endswith("sheela-routing.yaml")
     assert str(s.sheela_vault_index_path).endswith("vault_index.json")
+    assert s.rag_index_on_startup is False
 
 
 def test_settings_anthropic_optional(monkeypatch: pytest.MonkeyPatch, env: None):

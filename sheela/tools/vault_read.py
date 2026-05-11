@@ -76,3 +76,35 @@ class VaultReader:
     async def _read_one(self, relative_path: str) -> str:
         full = self.vault_path / relative_path
         return await asyncio.to_thread(full.read_text, encoding="utf-8")
+
+    async def get_current_sha(self) -> str | None:
+        """Current HEAD of the vault repo, or None if git is unavailable."""
+        try:
+            if not await self._git.is_git_repo():
+                return None
+            return await self._git.rev_parse_head()
+        except GitError:
+            return None
+
+    async def git_diff(
+        self, from_sha: str, to_sha: str
+    ) -> tuple[list[str], list[str]]:
+        """List paths changed (M/A/R/...) and deleted (D) between two SHAs."""
+        try:
+            out = await self._git.diff_name_status(from_sha, to_sha)
+        except GitError as e:
+            log.warning("git diff failed", error=str(e))
+            return [], []
+        changed: list[str] = []
+        deleted: list[str] = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            status = parts[0]
+            path = parts[-1]  # rename rows have the new path last
+            if status.startswith("D"):
+                deleted.append(path)
+            else:
+                changed.append(path)
+        return changed, deleted

@@ -41,3 +41,7 @@ class Settings(BaseSettings):
     sheela_log_mode: LogMode = "console"
     sheela_log_level: str = "INFO"
     sheela_debug: bool = False
+
+    # RAG: when true, bootstrap the embedding index on startup if it's empty.
+    # Subsequent restarts always do an incremental update if a prior SHA exists.
+    rag_index_on_startup: bool = False

@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import structlog
 
+from sheela.rag.hybrid import HybridSearcher
 from sheela.tools.vault_read import VaultReader
 from sheela.vault.index import VaultIndexer
 
@@ -22,12 +23,21 @@ log = structlog.get_logger(__name__)
 
 
 class VaultTools:
-    def __init__(self, vault_reader: VaultReader, vault_indexer: VaultIndexer) -> None:
+    def __init__(
+        self,
+        vault_reader: VaultReader,
+        vault_indexer: VaultIndexer,
+        searcher: HybridSearcher | None = None,
+    ) -> None:
         self.reader = vault_reader
         self.indexer = vault_indexer
+        self.searcher = searcher
 
     def get_callable_tools(self) -> list[Callable[..., Any]]:
-        return [self.vault_read, self.vault_list]
+        tools: list[Callable[..., Any]] = [self.vault_read, self.vault_list]
+        if self.searcher is not None:
+            tools.append(self.vault_search)
+        return tools
 
     async def vault_read(self, path: str) -> str:
         """Read a vault file by its relative path.
@@ -35,8 +45,8 @@ class VaultTools:
         Use this when you already know the exact path — for instance,
         after vault_list told you the path of a note. Paths are relative
         to the vault root with forward slashes. Examples:
-        'People/Family/Parent.md', 'Recipes/Dinner/Weeknight pasta.md',
-        'Career/Side project/Architecture.md'.
+        '03 People/Family/Parent.md', '06 Recipes/Dinner/Weeknight pasta.md',
+        '08 Career/Side project/Architecture.md'.
 
         Returns the full markdown content of the file.
         """
@@ -77,3 +87,43 @@ class VaultTools:
         except Exception as e:
             log.exception("vault_list failed", error=str(e))
             return []
+
+    async def vault_search(self, query: str, k: int = 5) -> list[dict[str, Any]]:
+        """Search the vault for free-form queries using hybrid retrieval.
+
+        Use this for "what did I say about X" or "find me notes about Y"
+        type questions where you don't know the exact path. For known
+        paths, use vault_read directly.
+
+        Returns up to k matching chunks. Each chunk has:
+        - path: the source file's vault-relative path
+        - section: the ## header that contained this chunk (or '_intro')
+        - content: the markdown text of the chunk
+
+        Hybrid retrieval combines vector similarity (semantic) and
+        keyword search (BM25-like FTS5). Reciprocal rank fusion merges
+        the two rankings.
+        """
+        if self.searcher is None:
+            return [
+                {
+                    "error": (
+                        "Vault search is not initialized. "
+                        "Set RAG_INDEX_ON_STARTUP=1 and restart, "
+                        "or trigger a build manually."
+                    )
+                }
+            ]
+        try:
+            results = await self.searcher.search(query, k=k)
+            return [
+                {
+                    "path": r["file_path"],
+                    "section": r["section_title"],
+                    "content": r["content"],
+                }
+                for r in results
+            ]
+        except Exception as e:
+            log.exception("vault_search failed", query=query, error=str(e))
+            return [{"error": f"Search failed: {e}"}]

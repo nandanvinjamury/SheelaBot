@@ -1,9 +1,9 @@
 """Discord client.
 
-Step 4: vault read tools are exposed to the LLM via automatic function
-calling. The model can call `vault_read` to fetch a specific file and
-`vault_list` to enumerate notes by type. The bot also kicks off a
-background vault-index build when it connects.
+Step 4 (b): vault_search joins vault_read and vault_list as an LLM tool.
+The bot opens the RAG store in setup_hook (bound to the bot's event loop)
+and triggers an incremental RAG build on connect if the index has been
+initialized previously, or a full build if RAG_INDEX_ON_STARTUP=1.
 """
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ from sheela.discord_bot.streaming import stream_to_discord
 from sheela.llm.base import LLMProvider, Message, RateLimitExhausted
 from sheela.llm.usage import UsageLogger
 from sheela.persona import PersonaLoader
+from sheela.rag.indexer import VaultIndexBuilder
+from sheela.rag.store import RAGStore
 from sheela.tools.vault_tools import VaultTools
 
 log = structlog.get_logger(__name__)
@@ -40,6 +42,8 @@ class SheelaClient(discord.Client):
         persona: PersonaLoader,
         channel_router: ChannelRouter,
         vault_tools: VaultTools,
+        rag_store: RAGStore,
+        rag_indexer: VaultIndexBuilder,
         usage_logger: UsageLogger,
     ) -> None:
         intents = discord.Intents.default()
@@ -50,7 +54,12 @@ class SheelaClient(discord.Client):
         self.persona = persona
         self.channel_router = channel_router
         self.vault_tools = vault_tools
+        self.rag_store = rag_store
+        self.rag_indexer = rag_indexer
         self.usage_logger = usage_logger
+
+    async def setup_hook(self) -> None:
+        await self.rag_store.connect()
 
     async def on_ready(self) -> None:
         user_id = self.user.id if self.user else None
@@ -64,6 +73,7 @@ class SheelaClient(discord.Client):
         else:
             log.info("watching guild", guild=guild.name, guild_id=guild.id)
         asyncio.create_task(self._build_vault_index())
+        asyncio.create_task(self._maybe_build_rag())
 
     async def _build_vault_index(self) -> None:
         try:
@@ -75,6 +85,20 @@ class SheelaClient(discord.Client):
             )
         except Exception as e:
             log.exception("vault index build failed", error=str(e))
+
+    async def _maybe_build_rag(self) -> None:
+        last_sha = await self.rag_store.get_meta("last_indexed_sha")
+        if last_sha is None and not self.settings.rag_index_on_startup:
+            log.info(
+                "rag not initialized; vault_search will be unavailable. "
+                "Set RAG_INDEX_ON_STARTUP=1 to bootstrap on next start."
+            )
+            return
+        try:
+            result = await self.rag_indexer.build()
+            log.info("rag build complete", **result)
+        except Exception as e:
+            log.exception("rag build failed", error=str(e))
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -162,6 +186,8 @@ def create_bot(
     persona: PersonaLoader,
     channel_router: ChannelRouter,
     vault_tools: VaultTools,
+    rag_store: RAGStore,
+    rag_indexer: VaultIndexBuilder,
     usage_logger: UsageLogger,
 ) -> SheelaClient:
     return SheelaClient(
@@ -170,5 +196,7 @@ def create_bot(
         persona=persona,
         channel_router=channel_router,
         vault_tools=vault_tools,
+        rag_store=rag_store,
+        rag_indexer=rag_indexer,
         usage_logger=usage_logger,
     )

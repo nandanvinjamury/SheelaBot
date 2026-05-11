@@ -55,3 +55,7 @@ class GitClient:
 
     async def pull(self, remote: str = "origin", branch: str = "main") -> None:
         await self._run("pull", "--ff-only", remote, branch)
+
+    async def diff_name_status(self, from_sha: str, to_sha: str) -> str:
+        """Raw `git diff --name-status FROM..TO` output."""
+        return await self._run("diff", "--name-status", f"{from_sha}..{to_sha}")
