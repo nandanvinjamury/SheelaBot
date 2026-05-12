@@ -1,13 +1,12 @@
 """Discord client.
 
-Step 6: per-channel sliding window memory. Prior turns load into the prompt
-verbatim (last 10 exchanges) plus a rolling summary of everything older
-("Earlier in this channel: ..."). After every successful exchange, the
-user+assistant pair is persisted and a background compaction check runs.
+Step 7: health endpoint, hardened error handling, and globally captured
+asyncio task exceptions so the bot never silently crashes.
 """
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import discord
 import structlog
@@ -15,6 +14,7 @@ import structlog
 from sheela.config import Settings
 from sheela.discord_bot.routing import ChannelRouter
 from sheela.discord_bot.streaming import stream_to_discord
+from sheela.health import HealthState, start_health_server
 from sheela.llm.base import LLMProvider, Message, RateLimitExhausted
 from sheela.llm.usage import UsageLogger
 from sheela.memory.conversations import ConversationManager
@@ -37,6 +37,23 @@ def respond_to(content: str) -> str | None:
             return None
 
 
+def _asyncio_exception_handler(
+    loop: asyncio.AbstractEventLoop, context: dict[str, Any]
+) -> None:
+    exc = context.get("exception")
+    if exc is not None:
+        log.error(
+            "uncaught asyncio task exception",
+            error=str(exc),
+            message=context.get("message"),
+            exc_type=type(exc).__name__,
+        )
+    else:
+        log.warning(
+            "asyncio loop issue", message=context.get("message")
+        )
+
+
 class SheelaClient(discord.Client):
     def __init__(
         self,
@@ -50,6 +67,7 @@ class SheelaClient(discord.Client):
         rag_indexer: VaultIndexBuilder,
         memory_store: MemoryStore,
         conversations: ConversationManager,
+        health_state: HealthState,
         usage_logger: UsageLogger,
     ) -> None:
         intents = discord.Intents.default()
@@ -65,17 +83,40 @@ class SheelaClient(discord.Client):
         self.rag_indexer = rag_indexer
         self.memory_store = memory_store
         self.conversations = conversations
+        self.health_state = health_state
         self.usage_logger = usage_logger
+        self._health_server: asyncio.base_events.Server | None = None
 
     async def setup_hook(self) -> None:
+        loop = asyncio.get_event_loop()
+        loop.set_exception_handler(_asyncio_exception_handler)
         await self.rag_store.connect()
         await self.memory_store.connect()
         if self.vault_writer.scheduler.has_pending_drafts():
             log.info("flushing leftover drafts from previous run")
             asyncio.create_task(self.vault_writer.scheduler.flush_now())
+        try:
+            self._health_server = await start_health_server(
+                host=self.settings.sheela_health_host,
+                port=self.settings.sheela_health_port,
+                state=self.health_state,
+            )
+        except OSError as e:
+            log.exception(
+                "health server failed to bind; continuing without it",
+                host=self.settings.sheela_health_host,
+                port=self.settings.sheela_health_port,
+                error=str(e),
+            )
 
     async def close(self) -> None:
         log.info("shutting down")
+        if self._health_server is not None:
+            try:
+                self._health_server.close()
+                await self._health_server.wait_closed()
+            except Exception as e:
+                log.exception("health server close failed", error=str(e))
         try:
             await self.vault_writer.shutdown()
         except Exception as e:
@@ -105,6 +146,12 @@ class SheelaClient(discord.Client):
         asyncio.create_task(self._maybe_build_rag())
         asyncio.create_task(self._startup_compact_all())
 
+    async def on_error(
+        self, event_method: str, /, *args: Any, **kwargs: Any
+    ) -> None:
+        """Override discord.py's default: route through structlog."""
+        log.exception("unhandled exception in discord event", event=event_method)
+
     async def _build_vault_index(self) -> None:
         try:
             index = await self.vault_tools.indexer.build()
@@ -117,7 +164,11 @@ class SheelaClient(discord.Client):
             log.exception("vault index build failed", error=str(e))
 
     async def _maybe_build_rag(self) -> None:
-        last_sha = await self.rag_store.get_meta("last_indexed_sha")
+        try:
+            last_sha = await self.rag_store.get_meta("last_indexed_sha")
+        except Exception as e:
+            log.exception("rag meta read failed; skipping build", error=str(e))
+            return
         if last_sha is None and not self.settings.rag_index_on_startup:
             log.info(
                 "rag not initialized; vault_search will be unavailable. "
@@ -142,23 +193,32 @@ class SheelaClient(discord.Client):
             log.exception("startup compaction failed")
 
     async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot:
-            return
-        if message.guild is None:
-            return  # No DMs — RULES.md hard rule.
-        if message.guild.id != self.settings.discord_guild_id:
-            return
+        try:
+            if message.author.bot:
+                return
+            if message.guild is None:
+                return  # No DMs — RULES.md hard rule.
+            if message.guild.id != self.settings.discord_guild_id:
+                return
 
-        content = self._strip_self_mention(message.content).strip()
-        if not content:
-            return
+            content = self._strip_self_mention(message.content).strip()
+            if not content:
+                return
 
-        quick = respond_to(content)
-        if quick is not None:
-            await message.channel.send(quick)
-            return
+            self.health_state.mark_message()
 
-        await self._handle_llm_message(message, content)
+            quick = respond_to(content)
+            if quick is not None:
+                await message.channel.send(quick)
+                return
+
+            await self._handle_llm_message(message, content)
+        except Exception as e:
+            log.exception(
+                "on_message handler crashed",
+                error=str(e),
+                channel=getattr(message.channel, "name", str(message.channel)),
+            )
 
     def _strip_self_mention(self, content: str) -> str:
         if self.user is None:
@@ -229,11 +289,14 @@ class SheelaClient(discord.Client):
                 return
 
             if usage is not None:
-                await self.usage_logger.log(
-                    channel=channel_name,
-                    task="respond",
-                    **usage,
-                )
+                try:
+                    await self.usage_logger.log(
+                        channel=channel_name,
+                        task="respond",
+                        **usage,
+                    )
+                except Exception:
+                    log.exception("usage log write failed", channel=channel_name)
 
             if not full_text.strip():
                 log.warning("empty response from llm", channel=channel_name)
@@ -276,6 +339,7 @@ def create_bot(
     rag_indexer: VaultIndexBuilder,
     memory_store: MemoryStore,
     conversations: ConversationManager,
+    health_state: HealthState,
     usage_logger: UsageLogger,
 ) -> SheelaClient:
     return SheelaClient(
@@ -289,5 +353,6 @@ def create_bot(
         rag_indexer=rag_indexer,
         memory_store=memory_store,
         conversations=conversations,
+        health_state=health_state,
         usage_logger=usage_logger,
     )

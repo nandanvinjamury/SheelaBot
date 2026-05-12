@@ -47,3 +47,7 @@ class Settings(BaseSettings):
     # RAG: when true, bootstrap the embedding index on startup if it's empty.
     # Subsequent restarts always do an incremental update if a prior SHA exists.
     rag_index_on_startup: bool = False
+
+    # Health endpoint. Loopback-only; never expose externally.
+    sheela_health_host: str = "127.0.0.1"
+    sheela_health_port: int = 8765

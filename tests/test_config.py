@@ -30,6 +30,8 @@ def test_settings_defaults(env: None):
     assert str(s.sheela_vault_index_path).endswith("vault_index.json")
     assert str(s.sheela_drafts_dir).endswith("drafts")
     assert s.rag_index_on_startup is False
+    assert s.sheela_health_host == "127.0.0.1"
+    assert s.sheela_health_port == 8765
 
 
 def test_settings_anthropic_optional(monkeypatch: pytest.MonkeyPatch, env: None):

@@ -6,6 +6,7 @@ import structlog
 from sheela.config import Settings
 from sheela.discord_bot.bot import create_bot
 from sheela.discord_bot.routing import ChannelRouter
+from sheela.health import HealthState
 from sheela.llm import make_provider
 from sheela.llm.router import ModelRouter
 from sheela.llm.usage import UsageLogger
@@ -82,6 +83,13 @@ def main() -> None:
     summarizer = ConversationSummarizer(llm)
     conversations = ConversationManager(memory_store, summarizer)
 
+    health_state = HealthState(
+        settings=settings,
+        vault_reader=vault_reader,
+        memory_store=memory_store,
+        draft_scheduler=drafts,
+    )
+
     log.info(
         "starting sheela bot",
         guild_id=settings.discord_guild_id,
@@ -93,6 +101,7 @@ def main() -> None:
         drafts=str(settings.sheela_drafts_dir),
         db=str(settings.sheela_db_path),
         rag_index_on_startup=settings.rag_index_on_startup,
+        health_endpoint=f"{settings.sheela_health_host}:{settings.sheela_health_port}",
         channels=sorted(channel_router.config.channels.keys()),
     )
 
@@ -107,6 +116,7 @@ def main() -> None:
         rag_indexer=rag_builder,
         memory_store=memory_store,
         conversations=conversations,
+        health_state=health_state,
         usage_logger=usage,
     )
     bot.run(settings.discord_bot_token.get_secret_value(), log_handler=None)

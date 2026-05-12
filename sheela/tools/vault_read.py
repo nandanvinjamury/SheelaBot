@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
@@ -29,6 +30,7 @@ class VaultReader:
         self._git = GitClient(vault_path)
         self._lock = asyncio.Lock()
         self._last_check_at: float = 0.0
+        self.last_check_iso: str | None = None
 
     async def ensure_fresh(self) -> None:
         """Public: perform the freshness check now if the TTL has elapsed."""
@@ -54,6 +56,7 @@ class VaultReader:
             except Exception as e:
                 log.warning("vault freshness unexpected error", error=str(e))
             self._last_check_at = now
+            self.last_check_iso = datetime.now(timezone.utc).isoformat()
 
     async def read(self, relative_path: str) -> str:
         await self.ensure_fresh()
