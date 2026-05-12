@@ -33,6 +33,8 @@ class Settings(BaseSettings):
 
     sheela_vault_index_path: Path = Path("/home/sheela/data/vault_index.json")
 
+    sheela_drafts_dir: Path = Path("/home/sheela/data/drafts")
+
     sheela_data_dir: Path = Path("/home/sheela/data")
     sheela_log_dir: Path = Path("/home/sheela/logs")
     sheela_db_path: Path = Path("/home/sheela/data/sheela.db")

@@ -53,9 +53,42 @@ class GitClient:
             raise GitError(f"ls-remote {remote} HEAD returned empty")
         return out.split()[0]
 
-    async def pull(self, remote: str = "origin", branch: str = "main") -> None:
-        await self._run("pull", "--ff-only", remote, branch)
+    async def pull(
+        self,
+        remote: str = "origin",
+        branch: str = "main",
+        rebase: bool = False,
+    ) -> None:
+        args = ["pull"]
+        if rebase:
+            args.append("--rebase")
+        else:
+            args.append("--ff-only")
+        args.extend([remote, branch])
+        await self._run(*args)
 
     async def diff_name_status(self, from_sha: str, to_sha: str) -> str:
         """Raw `git diff --name-status FROM..TO` output."""
         return await self._run("diff", "--name-status", f"{from_sha}..{to_sha}")
+
+    async def add(self, path: str) -> None:
+        await self._run("add", "--", path)
+
+    async def commit(
+        self,
+        message: str,
+        author_name: str = "Sheela Bot",
+        author_email: str = "sheela@bot.local",
+    ) -> None:
+        await self._run(
+            "-c",
+            f"user.name={author_name}",
+            "-c",
+            f"user.email={author_email}",
+            "commit",
+            "-m",
+            message,
+        )
+
+    async def push(self, remote: str = "origin", branch: str = "main") -> None:
+        await self._run("push", remote, branch)

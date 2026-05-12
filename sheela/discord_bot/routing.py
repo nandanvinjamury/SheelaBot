@@ -82,6 +82,16 @@ class ChannelRouter:
         if cfg.tone_hint:
             sections.append(f"## Tone hint\n\n{cfg.tone_hint.strip()}")
 
+        if cfg.vault_paths_writable_without_confirm:
+            writable = [
+                self._resolve_path(p)
+                for p in cfg.vault_paths_writable_without_confirm
+            ]
+            sections.append(
+                "## Writable without asking\n\n"
+                + "\n".join(f"- {p}" for p in writable)
+            )
+
         loaded = await self._load_vault_files(cfg.vault_paths_to_load)
         for path, content in loaded:
             sections.append(f"## Vault: {path}\n\n{content.strip()}")

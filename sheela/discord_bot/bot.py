@@ -1,9 +1,9 @@
 """Discord client.
 
-Step 4 (b): vault_search joins vault_read and vault_list as an LLM tool.
-The bot opens the RAG store in setup_hook (bound to the bot's event loop)
-and triggers an incremental RAG build on connect if the index has been
-initialized previously, or a full build if RAG_INDEX_ON_STARTUP=1.
+Step 5: vault_write joins the tool palette. The channel name flows through
+a contextvar so the safety check can consult the per-channel allowlist.
+Pending drafts are flushed on startup (in case of prior crash) and on
+shutdown (Client.close override) so systemd restarts don't lose writes.
 """
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ from sheela.llm.usage import UsageLogger
 from sheela.persona import PersonaLoader
 from sheela.rag.indexer import VaultIndexBuilder
 from sheela.rag.store import RAGStore
-from sheela.tools.vault_tools import VaultTools
+from sheela.tools.vault_tools import VaultTools, current_channel
+from sheela.tools.vault_write import VaultWriter
 
 log = structlog.get_logger(__name__)
 
@@ -42,6 +43,7 @@ class SheelaClient(discord.Client):
         persona: PersonaLoader,
         channel_router: ChannelRouter,
         vault_tools: VaultTools,
+        vault_writer: VaultWriter,
         rag_store: RAGStore,
         rag_indexer: VaultIndexBuilder,
         usage_logger: UsageLogger,
@@ -54,12 +56,25 @@ class SheelaClient(discord.Client):
         self.persona = persona
         self.channel_router = channel_router
         self.vault_tools = vault_tools
+        self.vault_writer = vault_writer
         self.rag_store = rag_store
         self.rag_indexer = rag_indexer
         self.usage_logger = usage_logger
 
     async def setup_hook(self) -> None:
         await self.rag_store.connect()
+        # Flush any drafts left from a previous run before we accept new ones
+        if self.vault_writer.scheduler.has_pending_drafts():
+            log.info("flushing leftover drafts from previous run")
+            asyncio.create_task(self.vault_writer.scheduler.flush_now())
+
+    async def close(self) -> None:
+        log.info("shutting down; flushing pending drafts")
+        try:
+            await self.vault_writer.shutdown()
+        except Exception as e:
+            log.exception("draft flush on shutdown failed", error=str(e))
+        await super().close()
 
     async def on_ready(self) -> None:
         user_id = self.user.id if self.user else None
@@ -136,48 +151,54 @@ class SheelaClient(discord.Client):
         channel_obj = message.channel
         channel_name = self._channel_name(channel_obj)
 
+        token = current_channel.set(channel_name)
         try:
-            async with channel_obj.typing():
-                persona_part = await self.persona.get_system_prompt()
-                channel_part = await self.channel_router.get_channel_context(
-                    channel_name
+            try:
+                async with channel_obj.typing():
+                    persona_part = await self.persona.get_system_prompt()
+                    channel_part = await self.channel_router.get_channel_context(
+                        channel_name
+                    )
+
+                system_prompt = persona_part
+                if channel_part:
+                    system_prompt = system_prompt + "\n\n---\n\n" + channel_part
+
+                messages = [Message(role="user", content=content)]
+                tools = self.vault_tools.get_callable_tools()
+                response_iter = self.llm.respond(
+                    system_prompt, messages, tools=tools, stream=True
+                )
+                full_text, usage = await stream_to_discord(
+                    channel_obj, response_iter
+                )
+            except RateLimitExhausted:
+                log.warning(
+                    "rate-limited; replying with fallback message",
+                    channel=channel_name,
+                )
+                await channel_obj.send("Rate-limited, try again in an hour.")
+                return
+            except Exception as e:
+                log.exception(
+                    "llm call failed", channel=channel_name, error=str(e)
+                )
+                await channel_obj.send(
+                    "Something broke on my end. Logs have details."
+                )
+                return
+
+            if usage is not None:
+                await self.usage_logger.log(
+                    channel=channel_name,
+                    task="respond",
+                    **usage,
                 )
 
-            system_prompt = persona_part
-            if channel_part:
-                system_prompt = system_prompt + "\n\n---\n\n" + channel_part
-
-            messages = [Message(role="user", content=content)]
-            tools = self.vault_tools.get_callable_tools()
-            response_iter = self.llm.respond(
-                system_prompt, messages, tools=tools, stream=True
-            )
-            full_text, usage = await stream_to_discord(channel_obj, response_iter)
-        except RateLimitExhausted:
-            log.warning(
-                "rate-limited; replying with fallback message",
-                channel=channel_name,
-            )
-            await channel_obj.send("Rate-limited, try again in an hour.")
-            return
-        except Exception as e:
-            log.exception(
-                "llm call failed", channel=channel_name, error=str(e)
-            )
-            await channel_obj.send(
-                "Something broke on my end. Logs have details."
-            )
-            return
-
-        if usage is not None:
-            await self.usage_logger.log(
-                channel=channel_name,
-                task="respond",
-                **usage,
-            )
-
-        if not full_text.strip():
-            log.warning("empty response from llm", channel=channel_name)
+            if not full_text.strip():
+                log.warning("empty response from llm", channel=channel_name)
+        finally:
+            current_channel.reset(token)
 
 
 def create_bot(
@@ -186,6 +207,7 @@ def create_bot(
     persona: PersonaLoader,
     channel_router: ChannelRouter,
     vault_tools: VaultTools,
+    vault_writer: VaultWriter,
     rag_store: RAGStore,
     rag_indexer: VaultIndexBuilder,
     usage_logger: UsageLogger,
@@ -196,6 +218,7 @@ def create_bot(
         persona=persona,
         channel_router=channel_router,
         vault_tools=vault_tools,
+        vault_writer=vault_writer,
         rag_store=rag_store,
         rag_indexer=rag_indexer,
         usage_logger=usage_logger,

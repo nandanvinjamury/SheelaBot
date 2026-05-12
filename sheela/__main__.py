@@ -14,8 +14,12 @@ from sheela.rag.embeddings import GeminiEmbedder
 from sheela.rag.hybrid import HybridSearcher
 from sheela.rag.indexer import VaultIndexBuilder
 from sheela.rag.store import RAGStore
+from sheela.tools.drafts import DraftScheduler
+from sheela.tools.git import GitClient
+from sheela.tools.safety import SafetyChecker
 from sheela.tools.vault_read import VaultReader
 from sheela.tools.vault_tools import VaultTools
+from sheela.tools.vault_write import VaultWriter
 from sheela.utils.logging import configure_logging
 from sheela.vault.index import VaultIndexer
 
@@ -33,14 +37,42 @@ def main() -> None:
     searcher = HybridSearcher(rag_store, embedder)
     rag_builder = VaultIndexBuilder(vault_reader, rag_store, embedder)
 
-    vault_tools = VaultTools(vault_reader, vault_indexer, searcher=searcher)
-
-    persona = PersonaLoader(vault_reader)
     channel_router = ChannelRouter(
         settings.sheela_routing_path,
         vault_reader,
         settings.sheela_tz,
     )
+    safety = SafetyChecker(
+        vault_path=settings.vault_repo_path,
+        tz=settings.sheela_tz,
+        channel_router=channel_router,
+    )
+    drafts = DraftScheduler(settings.sheela_drafts_dir)
+    git_client = GitClient(settings.vault_repo_path)
+
+    async def _post_flush() -> None:
+        # After a successful write/commit/push, invalidate metadata and
+        # let the RAG indexer pick up changes incrementally.
+        vault_indexer.invalidate()
+        try:
+            await rag_builder.build()
+        except Exception:
+            log.exception("post-flush rag rebuild failed")
+
+    vault_writer = VaultWriter(
+        vault_path=settings.vault_repo_path,
+        scheduler=drafts,
+        safety=safety,
+        git_client=git_client,
+        on_post_flush=_post_flush,
+    )
+    drafts.on_flush = vault_writer.flush_callback
+
+    vault_tools = VaultTools(
+        vault_reader, vault_indexer, searcher=searcher, writer=vault_writer
+    )
+
+    persona = PersonaLoader(vault_reader)
     model_router = ModelRouter()
     usage = UsageLogger(settings.sheela_log_dir)
     llm = make_provider(settings, router=model_router)
@@ -53,6 +85,7 @@ def main() -> None:
         vault=str(settings.vault_repo_path),
         routing=str(settings.sheela_routing_path),
         vault_index=str(settings.sheela_vault_index_path),
+        drafts=str(settings.sheela_drafts_dir),
         db=str(settings.sheela_db_path),
         rag_index_on_startup=settings.rag_index_on_startup,
         channels=sorted(channel_router.config.channels.keys()),
@@ -64,6 +97,7 @@ def main() -> None:
         persona=persona,
         channel_router=channel_router,
         vault_tools=vault_tools,
+        vault_writer=vault_writer,
         rag_store=rag_store,
         rag_indexer=rag_builder,
         usage_logger=usage,

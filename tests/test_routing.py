@@ -86,6 +86,40 @@ async def test_tone_hint_appears_when_set(reader: VaultReader, routing_yaml: Pat
     assert "Educational only" in ctx
 
 
+async def test_writable_section_appears(reader: VaultReader, routing_yaml: Path):
+    router = ChannelRouter(routing_yaml, reader, TZ)
+    ctx = await router.get_channel_context("general")
+    assert ctx is not None
+    assert "Writable without asking" in ctx
+    assert "Inbox.md" in ctx
+
+
+async def test_writable_section_absent_when_empty(
+    reader: VaultReader, tmp_path: Path
+):
+    import yaml as _yaml
+    cfg_path = tmp_path / "r.yaml"
+    cfg_path.write_text(
+        _yaml.safe_dump(
+            {
+                "channels": {
+                    "noop": {
+                        "description": "x",
+                        "vault_paths_to_load": [],
+                        "vault_paths_writable_without_confirm": [],
+                        "tone_hint": None,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    router = ChannelRouter(cfg_path, reader, TZ)
+    ctx = await router.get_channel_context("noop")
+    assert ctx is not None
+    assert "Writable without asking" not in ctx
+
+
 async def test_tone_hint_section_absent_when_null(
     reader: VaultReader, routing_yaml: Path
 ):

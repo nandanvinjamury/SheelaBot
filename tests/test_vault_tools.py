@@ -62,10 +62,39 @@ async def test_vault_list_unknown_type_returns_empty(tools: VaultTools):
 
 def test_get_callable_tools(tools: VaultTools):
     callables = tools.get_callable_tools()
-    # tools fixture has no searcher → only read + list
+    # tools fixture has no searcher and no writer → only read + list
     assert len(callables) == 2
     names = {c.__name__ for c in callables}
     assert names == {"vault_read", "vault_list"}
+
+
+def test_get_callable_tools_includes_writer_tools(vault, tmp_path):
+    from unittest.mock import AsyncMock
+    from sheela.tools.drafts import DraftScheduler
+    from sheela.tools.safety import SafetyChecker
+    from sheela.tools.vault_read import VaultReader
+    from sheela.tools.vault_write import VaultWriter
+    from sheela.vault.index import VaultIndexer
+
+    reader = VaultReader(vault)
+    indexer = VaultIndexer(reader, tmp_path / "idx.json")
+    safety = SafetyChecker(vault_path=vault, tz="America/New_York")
+    scheduler = DraftScheduler(tmp_path / "drafts", debounce_seconds=999)
+    writer = VaultWriter(
+        vault_path=vault,
+        scheduler=scheduler,
+        safety=safety,
+        git_client=AsyncMock(),
+    )
+    tools_with_writer = VaultTools(reader, indexer, writer=writer)
+    names = {c.__name__ for c in tools_with_writer.get_callable_tools()}
+    assert names == {
+        "vault_read",
+        "vault_list",
+        "vault_write",
+        "vault_cancel_draft",
+        "vault_list_drafts",
+    }
 
 
 async def test_vault_search_returns_helpful_error_when_uninitialized(
@@ -76,6 +105,11 @@ async def test_vault_search_returns_helpful_error_when_uninitialized(
     assert len(results) == 1
     assert "error" in results[0]
     assert "not initialized" in results[0]["error"].lower()
+
+
+async def test_vault_write_without_writer_returns_denied(tools: VaultTools):
+    msg = await tools.vault_write("Inbox.md", "x", "append")
+    assert "denied" in msg.lower()
 
 
 def test_get_callable_tools_includes_search_when_configured(

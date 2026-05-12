@@ -5,21 +5,28 @@ introspects type hints and docstrings to build the schema; the docstrings
 are the LLM's user-manual for when to call each tool, so they're written
 for the model, not for humans.
 
-Tools return either a string (file contents) or a list of dicts (metadata).
-Errors are converted to short error messages — the model can recover by
-trying a different path or tool, rather than the whole conversation crashing.
+The "current channel" for a write is propagated through a contextvar that
+the Discord bot sets before each LLM call; the safety check uses it to
+consult the channel's `vault_paths_writable_without_confirm` list.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Any, Callable
 
 import structlog
 
 from sheela.rag.hybrid import HybridSearcher
 from sheela.tools.vault_read import VaultReader
+from sheela.tools.vault_write import VaultWriter
 from sheela.vault.index import VaultIndexer
 
 log = structlog.get_logger(__name__)
+
+
+current_channel: ContextVar[str | None] = ContextVar(
+    "sheela_current_channel", default=None
+)
 
 
 class VaultTools:
@@ -28,15 +35,21 @@ class VaultTools:
         vault_reader: VaultReader,
         vault_indexer: VaultIndexer,
         searcher: HybridSearcher | None = None,
+        writer: VaultWriter | None = None,
     ) -> None:
         self.reader = vault_reader
         self.indexer = vault_indexer
         self.searcher = searcher
+        self.writer = writer
 
     def get_callable_tools(self) -> list[Callable[..., Any]]:
         tools: list[Callable[..., Any]] = [self.vault_read, self.vault_list]
         if self.searcher is not None:
             tools.append(self.vault_search)
+        if self.writer is not None:
+            tools.extend(
+                [self.vault_write, self.vault_cancel_draft, self.vault_list_drafts]
+            )
         return tools
 
     async def vault_read(self, path: str) -> str:
@@ -95,14 +108,7 @@ class VaultTools:
         type questions where you don't know the exact path. For known
         paths, use vault_read directly.
 
-        Returns up to k matching chunks. Each chunk has:
-        - path: the source file's vault-relative path
-        - section: the ## header that contained this chunk (or '_intro')
-        - content: the markdown text of the chunk
-
-        Hybrid retrieval combines vector similarity (semantic) and
-        keyword search (BM25-like FTS5). Reciprocal rank fusion merges
-        the two rankings.
+        Returns up to k matching chunks with path, section, content.
         """
         if self.searcher is None:
             return [
@@ -127,3 +133,84 @@ class VaultTools:
         except Exception as e:
             log.exception("vault_search failed", query=query, error=str(e))
             return [{"error": f"Search failed: {e}"}]
+
+    async def vault_write(
+        self,
+        path: str,
+        content: str,
+        operation: str = "append",
+        confirmed: bool = False,
+    ) -> str:
+        """Queue a write to a vault file. Use this to log data, append to
+        notes, or create files.
+
+        operation:
+          - 'append' (default): add content to end of file, newline-separated.
+            Use for daily-note entries, inbox additions, match logs, MEMORY notes.
+          - 'overwrite': replace the entire file. For frontmatter updates,
+            first read the file with vault_read, modify it, then call vault_write
+            with operation='overwrite' and the full new content.
+
+        Path is vault-relative with forward slashes, e.g.
+        '01 Daily/2026-05-12.md', '06 Recipes/Dinner/Weeknight pasta.md'. The
+        channel context's "Writable without asking" section lists paths that
+        are pre-authorized for the current channel.
+
+        confirmed: set to true ONLY after the user has explicitly agreed to
+        a write that previously returned "needs confirmation". Do not set
+        preemptively.
+
+        Returns one of:
+          - "draft queued: <id> -> <path>" — success; flushes in ~30s
+          - "needs confirmation: ..." — ask the user, then retry with confirmed=true
+          - "denied: ..." — hard rule; tell the user and move on
+
+        Writes are batched: multiple writes within 30 seconds become a
+        single git commit and a single push.
+        """
+        if self.writer is None:
+            return "denied: vault writes are not enabled"
+        channel = current_channel.get()
+        _, message = await self.writer.request_write(
+            path=path,
+            content=content,
+            operation=operation,
+            channel=channel,
+            confirmed=confirmed,
+        )
+        return message
+
+    async def vault_cancel_draft(self, draft_id: str) -> str:
+        """Cancel a pending vault write before it commits.
+
+        Use when you queued a write and then realize it was wrong, before
+        the 30-second debounce window elapses. After cancellation, the
+        draft will not be written or committed.
+        """
+        if self.writer is None:
+            return "no writer configured"
+        _, message = await self.writer.cancel(draft_id)
+        return message
+
+    async def vault_list_drafts(self) -> list[dict[str, Any]]:
+        """List vault writes that are queued but not yet flushed.
+
+        Useful when deciding whether to add another write to the current
+        batch, or to verify what's about to be committed. Returns each
+        draft's id, target path, operation, queued_at, and content preview.
+        """
+        if self.writer is None:
+            return []
+        drafts = self.writer.list_pending()
+        return [
+            {
+                "draft_id": d.draft_id,
+                "target_path": d.target_path,
+                "operation": d.operation,
+                "queued_at": d.queued_at,
+                "content_preview": (
+                    d.content[:200] + "..." if len(d.content) > 200 else d.content
+                ),
+            }
+            for d in drafts
+        ]
