@@ -1,9 +1,9 @@
 """Discord client.
 
-Step 5: vault_write joins the tool palette. The channel name flows through
-a contextvar so the safety check can consult the per-channel allowlist.
-Pending drafts are flushed on startup (in case of prior crash) and on
-shutdown (Client.close override) so systemd restarts don't lose writes.
+Step 6: per-channel sliding window memory. Prior turns load into the prompt
+verbatim (last 10 exchanges) plus a rolling summary of everything older
+("Earlier in this channel: ..."). After every successful exchange, the
+user+assistant pair is persisted and a background compaction check runs.
 """
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ from sheela.discord_bot.routing import ChannelRouter
 from sheela.discord_bot.streaming import stream_to_discord
 from sheela.llm.base import LLMProvider, Message, RateLimitExhausted
 from sheela.llm.usage import UsageLogger
+from sheela.memory.conversations import ConversationManager
+from sheela.memory.store import MemoryStore
 from sheela.persona import PersonaLoader
 from sheela.rag.indexer import VaultIndexBuilder
 from sheela.rag.store import RAGStore
@@ -46,6 +48,8 @@ class SheelaClient(discord.Client):
         vault_writer: VaultWriter,
         rag_store: RAGStore,
         rag_indexer: VaultIndexBuilder,
+        memory_store: MemoryStore,
+        conversations: ConversationManager,
         usage_logger: UsageLogger,
     ) -> None:
         intents = discord.Intents.default()
@@ -59,21 +63,31 @@ class SheelaClient(discord.Client):
         self.vault_writer = vault_writer
         self.rag_store = rag_store
         self.rag_indexer = rag_indexer
+        self.memory_store = memory_store
+        self.conversations = conversations
         self.usage_logger = usage_logger
 
     async def setup_hook(self) -> None:
         await self.rag_store.connect()
-        # Flush any drafts left from a previous run before we accept new ones
+        await self.memory_store.connect()
         if self.vault_writer.scheduler.has_pending_drafts():
             log.info("flushing leftover drafts from previous run")
             asyncio.create_task(self.vault_writer.scheduler.flush_now())
 
     async def close(self) -> None:
-        log.info("shutting down; flushing pending drafts")
+        log.info("shutting down")
         try:
             await self.vault_writer.shutdown()
         except Exception as e:
             log.exception("draft flush on shutdown failed", error=str(e))
+        try:
+            await self.memory_store.close()
+        except Exception as e:
+            log.exception("memory store close failed", error=str(e))
+        try:
+            await self.rag_store.close()
+        except Exception as e:
+            log.exception("rag store close failed", error=str(e))
         await super().close()
 
     async def on_ready(self) -> None:
@@ -89,6 +103,7 @@ class SheelaClient(discord.Client):
             log.info("watching guild", guild=guild.name, guild_id=guild.id)
         asyncio.create_task(self._build_vault_index())
         asyncio.create_task(self._maybe_build_rag())
+        asyncio.create_task(self._startup_compact_all())
 
     async def _build_vault_index(self) -> None:
         try:
@@ -114,6 +129,17 @@ class SheelaClient(discord.Client):
             log.info("rag build complete", **result)
         except Exception as e:
             log.exception("rag build failed", error=str(e))
+
+    async def _startup_compact_all(self) -> None:
+        try:
+            results = await self.conversations.compact_all_channels()
+            if results:
+                log.info(
+                    "startup compaction done",
+                    channels=list(results.keys()),
+                )
+        except Exception:
+            log.exception("startup compaction failed")
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -159,12 +185,26 @@ class SheelaClient(discord.Client):
                     channel_part = await self.channel_router.get_channel_context(
                         channel_name
                     )
+                    summary, recent = await self.conversations.get_context(
+                        channel_name
+                    )
 
                 system_prompt = persona_part
                 if channel_part:
                     system_prompt = system_prompt + "\n\n---\n\n" + channel_part
+                if summary:
+                    system_prompt = (
+                        system_prompt
+                        + "\n\n---\n\n## Earlier in this channel\n\n"
+                        + summary
+                    )
 
-                messages = [Message(role="user", content=content)]
+                messages: list[Message] = [
+                    Message(role=m["role"], content=m["content"])
+                    for m in recent
+                ]
+                messages.append(Message(role="user", content=content))
+
                 tools = self.vault_tools.get_callable_tools()
                 response_iter = self.llm.respond(
                     system_prompt, messages, tools=tools, stream=True
@@ -197,8 +237,32 @@ class SheelaClient(discord.Client):
 
             if not full_text.strip():
                 log.warning("empty response from llm", channel=channel_name)
+                return
+
+            try:
+                await self.conversations.record_exchange(
+                    channel_name,
+                    content,
+                    full_text,
+                    tokens_in=int((usage or {}).get("input_tokens", 0) or 0),
+                    tokens_out=int((usage or {}).get("output_tokens", 0) or 0),
+                )
+            except Exception:
+                log.exception(
+                    "memory persist failed", channel=channel_name
+                )
+
+            asyncio.create_task(self._safe_compact(channel_name))
         finally:
             current_channel.reset(token)
+
+    async def _safe_compact(self, channel_id: str) -> None:
+        try:
+            result = await self.conversations.maybe_compact(channel_id)
+            if result is not None:
+                log.info("compaction done", channel=channel_id, **result)
+        except Exception:
+            log.exception("compaction failed", channel=channel_id)
 
 
 def create_bot(
@@ -210,6 +274,8 @@ def create_bot(
     vault_writer: VaultWriter,
     rag_store: RAGStore,
     rag_indexer: VaultIndexBuilder,
+    memory_store: MemoryStore,
+    conversations: ConversationManager,
     usage_logger: UsageLogger,
 ) -> SheelaClient:
     return SheelaClient(
@@ -221,5 +287,7 @@ def create_bot(
         vault_writer=vault_writer,
         rag_store=rag_store,
         rag_indexer=rag_indexer,
+        memory_store=memory_store,
+        conversations=conversations,
         usage_logger=usage_logger,
     )

@@ -9,6 +9,9 @@ from sheela.discord_bot.routing import ChannelRouter
 from sheela.llm import make_provider
 from sheela.llm.router import ModelRouter
 from sheela.llm.usage import UsageLogger
+from sheela.memory.conversations import ConversationManager
+from sheela.memory.store import MemoryStore
+from sheela.memory.summarizer import ConversationSummarizer
 from sheela.persona import PersonaLoader
 from sheela.rag.embeddings import GeminiEmbedder
 from sheela.rag.hybrid import HybridSearcher
@@ -51,8 +54,6 @@ def main() -> None:
     git_client = GitClient(settings.vault_repo_path)
 
     async def _post_flush() -> None:
-        # After a successful write/commit/push, invalidate metadata and
-        # let the RAG indexer pick up changes incrementally.
         vault_indexer.invalidate()
         try:
             await rag_builder.build()
@@ -77,6 +78,10 @@ def main() -> None:
     usage = UsageLogger(settings.sheela_log_dir)
     llm = make_provider(settings, router=model_router)
 
+    memory_store = MemoryStore(settings.sheela_db_path)
+    summarizer = ConversationSummarizer(llm)
+    conversations = ConversationManager(memory_store, summarizer)
+
     log.info(
         "starting sheela bot",
         guild_id=settings.discord_guild_id,
@@ -100,6 +105,8 @@ def main() -> None:
         vault_writer=vault_writer,
         rag_store=rag_store,
         rag_indexer=rag_builder,
+        memory_store=memory_store,
+        conversations=conversations,
         usage_logger=usage,
     )
     bot.run(settings.discord_bot_token.get_secret_value(), log_handler=None)

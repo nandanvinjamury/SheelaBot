@@ -236,9 +236,23 @@ class GeminiProvider:
         raise NotImplementedError("GeminiProvider.embed — implemented in Step 4 (RAG)")
 
     async def summarize(self, text: str, max_tokens: int) -> str:
-        raise NotImplementedError(
-            "GeminiProvider.summarize — implemented in Step 6 (memory)"
+        """One-shot summarization via Flash-Lite (the cheaper, higher-RPD
+        model in the router). The caller embeds any task-specific instructions
+        into `text`; we only enforce shape (one paragraph, no preamble)."""
+        model_name = self.router.flash_lite
+        config = genai_types.GenerateContentConfig(
+            system_instruction=(
+                "You are a concise summarization tool. Output exactly ONE "
+                "paragraph. No preamble, no bullets, no headers."
+            ),
+            max_output_tokens=max_tokens,
         )
+        response = await self._call_with_backoff(
+            model_name,
+            [{"role": "user", "parts": [{"text": text}]}],
+            config,
+        )
+        return _extract_text(response).strip()
 
 
 _: type[LLMProvider] = GeminiProvider  # type: ignore[assignment]
