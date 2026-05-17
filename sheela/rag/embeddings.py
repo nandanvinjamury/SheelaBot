@@ -1,8 +1,10 @@
 """Gemini embedding wrapper.
 
-Uses `text-embedding-004` (768-dim, free tier 1500 RPM). Calls are made
-through the same `google-genai` client as the conversational LLM. Backoff
-with jitter on 429.
+Uses `gemini-embedding-001` — the current GA embedding model in the
+google-genai SDK (the older `text-embedding-004` was retired from the
+v1beta endpoint). The model returns 3072-dim vectors by default; we
+request `output_dimensionality=768` to match the FLOAT[768] schema in
+RAGStore. Backoff with jitter on 429.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from typing import Any
 import structlog
 from google import genai
 from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 from sheela.config import Settings
 
@@ -33,13 +36,16 @@ def _is_rate_limit(exc: BaseException) -> bool:
 
 
 class GeminiEmbedder:
-    MODEL = "text-embedding-004"
+    MODEL = "gemini-embedding-001"
     DIM = 768
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._client = genai.Client(
             api_key=settings.gemini_api_key.get_secret_value()
+        )
+        self._config = genai_types.EmbedContentConfig(
+            output_dimensionality=self.DIM,
         )
 
     async def embed_one(self, text: str) -> list[float]:
@@ -64,6 +70,7 @@ class GeminiEmbedder:
                 return await self._client.aio.models.embed_content(
                     model=self.MODEL,
                     contents=text,
+                    config=self._config,
                 )
             except genai_errors.ClientError as e:
                 if not _is_rate_limit(e):
